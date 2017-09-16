@@ -13,9 +13,9 @@ from __future__ import division
 from __future__ import print_function
 
 import os
-import urllib 
+import urllib  
 # Not sure if this part should be changed to urllib.request or not for Python 3
-# Example: import urllib.request
+# Example: import urllib.request...?
 
 import numpy as np
 import tensorflow as tf
