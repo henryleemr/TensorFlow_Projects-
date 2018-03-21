@@ -24,6 +24,7 @@ import tensorflow as tf
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.python.client import timeline
 
+# Solve Linear System using Conjugate Gradient descent method 
 class IterativeSolver(object):
     """Abstract base class for iterative solvers."""
     def __init__(self, name=None):
@@ -58,9 +59,6 @@ class IterativeSolver(object):
             lambda *args: tf.logical_not(self._stop(self.state(*args))),
             lambda *args: self._iterate(self.state(*args)),
             self._init())
-
-
-
 
 class ConjugateGradient(IterativeSolver):
     def __init__(self, prob, sett, b, x_init, tol=1e-6, max_iterations=100, **kwargs):
@@ -110,9 +108,6 @@ class ConjugateGradient(IterativeSolver):
         return tf.logical_or(
             state.k >= self.max_iterations,
             state.r_norm_sq <= self.tol*self.tol*self.r_norm_sq0)
-
-
-
 
 OSQP_INFTY = 1.e+20          # OSQP Infinity
 OSQP_NAN = 1.e+20            # OSQP Nan
@@ -180,156 +175,6 @@ class problem(object):
         self.np_P = P
         self.np_A = A
         self.np_q = q
-
-class state_while(object):
-    def __init__(self, prob, sett):
-        m = prob.m_val
-        n = prob.n_val
-        self.x = tf.Variable(tf.zeros((n,1), dtype=tf.float32))
-        self.z = tf.Variable(tf.zeros((m,1), dtype=tf.float32))
-        self.xz_tilde = tf.Variable(tf.zeros((n+m,1), dtype=tf.float32))
-        self.x_prev = tf.Variable(tf.zeros((n,1), dtype=tf.float32))
-        self.z_prev = tf.Variable(tf.zeros((m,1), dtype=tf.float32))
-        self.y = tf.Variable(tf.zeros((m,1), dtype=tf.float32))
-        self.dx = tf.Variable(tf.zeros((n,1), dtype=tf.float32))
-        self.dy = tf.Variable(tf.zeros((m,1), dtype=tf.float32))
-        self.obj_val = tf.Variable(0, dtype=tf.float32)
-        self.pri_res = tf.Variable(0, dtype=tf.float32)
-        self.dua_res = tf.Variable(0, dtype=tf.float32)
-        self.cg_iter = tf.Variable([], dtype=tf.int32, validate_shape=False)
-        self.cg_time = tf.Variable([], dtype=tf.float32, validate_shape=False)
-
-def ATY_while(prob, y):
-    return tf.sparse_tensor_dense_matmul(prob.AT, y)
-
-def solve_linear_while(prob, sett, RHS, x_init):
-    """Solve the linear system using conjugate gradient.
-    x = (P + sigma*I + A'*A*rho)' * (r1 + rho*A'*r2)
-    y = (A*x - r2) * rho
-
-    where: KKT * [x;y] = rhs
-    and rhs = [r1; r2]
-    """
-    # r1 is dense row1 of rhs vector from update_xz_tilde,
-    # i.e. RHS = xz_tilde, the 3x1 vector [x_tilde; v_tilde]
-    ## Solve linear system
-    r1 = RHS[:prob.n_val]
-    r2 = RHS[prob.n_val:]
-    # Set up rhs
-    rhs = r1 + sett.rho * tf.sparse_tensor_dense_matmul(prob.AT, r2)
-    # Solve to obtain x first using conjugate gradient method solving Mx = b
-    cg = ConjugateGradient(prob, sett, rhs, x_init, sett.cg_tol, sett.cg_max_iter)
-    state = cg.solve()
-    x = state.x
-    cg_iter = state.k
-    # Now find y = (A*x - r2) * rho
-    y = tf.sparse_tensor_dense_matmul(prob.A, x) - r2
-    y = y * sett.rho
-    # Finally form the output [x; y] as the new xz_tilde
-    RHS = tf.concat([x, y], 0)
-    return RHS, cg_iter
-
-def iterate_while(prob, sett, state):
-    x = state.x
-    z = state.z
-    y = state.y
-    dx = state.dx
-    dy = state.dy
-    x_prev = state.x_prev
-    z_prev = state.z_prev
-    xz_tilde = state.xz_tilde
-    cg_iter = state.cg_iter
-    cg_time = state.cg_time
-
-    # # Update x_prev, z_prev
-    # upd_x_prev = tf.assign(x_prev, upd_x)
-    # upd_z_prev = tf.assign(z_prev, upd_z)
-    """
-    First ADMM step: update xz_tilde
-    """
-    # Row 1 of the rhs term
-    tilderow1 = x * sett.sigma - prob.q
-    # Row 2 of the rhs term
-    tilderow2 = z_prev - (y / sett.rho)
-    # Vertically stack tilderow1 and tilderow2
-    tilde = tf.concat([tilderow1, tilderow2], axis=0)
-
-    cg_init = time.time()
-
-    # Solve linear system
-    cg_xz_tilde, cg_iter_elem = solve_linear_while(prob, sett, tilde, x)
-
-    # Append the new cg_time element to the cg_time array
-    cg_time_elem = time.time() - cg_init
-    cg_time_tensor = tf.convert_to_tensor(cg_time_elem, dtype=tf.float32)
-    upd_cg_time = tf.concat([cg_time, [cg_time_tensor]], 0)
-
-    # Append the new cg_iter element to the cg_iter array
-    upd_cg_iter = tf.concat([cg_iter, [cg_iter_elem]], 0)
-    # Update z_tilde
-    v_new = cg_xz_tilde[prob.n_val:]
-    z_tilde_new = z_prev + (1 / sett.rho) * (v_new - y)
-    # And then put v_term back into xz_tilde
-    upd_xz_tilde = tf.concat([cg_xz_tilde[:prob.n_val], z_tilde_new], 0)
-    """
-    ADMM step 2.1: Update variable x
-    """
-    # Extract top term i.e. new x
-    upd_x = (sett.alpha * upd_xz_tilde[:prob.n_val]) + (1 - sett.alpha) * x_prev
-    upd_dx = upd_x - x_prev
-    """
-    ADMM step 2.2: Update variable z
-    """
-    first = sett.alpha * upd_xz_tilde[prob.n_val:]
-    second = (1 - sett.alpha) * z_prev
-    third = (1 / sett.rho) * y
-    z_pre_proj = first + second + third
-    """
-    Project z variable in set C (for now C = [l, u])
-    """
-    max_term = tf.maximum(z_pre_proj, prob.l)
-    upd_z = tf.minimum(max_term, prob.u)
-    """
-    ADMM step 3: update dual variable y
-    """
-    term1 = sett.alpha * upd_xz_tilde[prob.n_val:]
-    term2 = (1 - sett.alpha) * z_prev
-    upd_dy = sett.rho * (term1 + term2 - z)
-    upd_y = y + upd_dy
-    """
-    Compute quadratic objective value for the given x
-    """
-    xTPx = tf.matmul(tf.transpose(upd_x), tf.sparse_tensor_dense_matmul(prob.P, upd_x))
-    upd_obj_val = 0.5 * xTPx + tf.tensordot(tf.transpose(prob.q), upd_x, axes=1)
-    """
-    Compute primal residual ||Ax - z||
-    """
-    normterm = tf.norm(tf.sparse_tensor_dense_matmul(prob.A, upd_x) - upd_z)
-    if prob.m_val == 0: # No constraints
-        upd_pri_res = 0
-    else:
-        upd_pri_res = normterm
-    """
-    Compute dual residual ||Px + q + A'y||
-    """
-    PX = tf.sparse_tensor_dense_matmul(prob.P, upd_x)
-    upd_dua_res =  tf.norm(PX + prob.q + ATY_while(prob, upd_y))
-    """
-    Finally update all values
-    """
-    return  tf.group(tf.assign(state.x, upd_x), \
-            tf.assign(state.z, upd_z), \
-            tf.assign(state.y, upd_y), \
-            tf.assign(state.dx, upd_dx), \
-            tf.assign(state.dy, upd_dy), \
-            tf.assign(state.xz_tilde, upd_xz_tilde), \
-            tf.assign(state.x_prev, upd_x), \
-            tf.assign(state.z_prev, upd_z), \
-            tf.assign(state.obj_val, upd_obj_val, validate_shape=False), \
-            tf.assign(state.pri_res, upd_pri_res, validate_shape=False), \
-            tf.assign(state.dua_res, upd_dua_res, validate_shape=False), \
-            tf.assign(state.cg_iter, upd_cg_iter, validate_shape=False), \
-            tf.assign(state.cg_time, upd_cg_time, validate_shape=False))
 
 class OSQP(object):
     def __init__(self, prob, sett):
